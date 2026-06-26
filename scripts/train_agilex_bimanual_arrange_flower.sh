@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${AGILEX_TRAIN_IN_TMUX:-}" && -z "${TMUX:-}" ]]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is not installed or not in PATH."
+    exit 1
+  fi
+
+  SCRIPT_PATH="$(readlink -f "$0")"
+  SESSION_NAME="hyn"
+  WINDOW_NAME="arrange_flower_train"
+  TRAIN_CMD="AGILEX_TRAIN_IN_TMUX=1 bash ${SCRIPT_PATH}; exec bash"
+
+  if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+    tmux new-window -t "${SESSION_NAME}" -n "${WINDOW_NAME}" "${TRAIN_CMD}"
+    tmux attach-session -t "${SESSION_NAME}"
+  else
+    tmux new-session -s "${SESSION_NAME}" -n "${WINDOW_NAME}" "${TRAIN_CMD}"
+  fi
+  exit 0
+fi
+
 cd /mnt/data/hyn/agilex
 
 MODEL_ROOT="/mnt/data/hyn/model"
