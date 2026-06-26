@@ -17,6 +17,7 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
+import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
@@ -89,6 +90,8 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # Video backend to use for LeRobot datasets. If None, LeRobot chooses its default backend.
+    video_backend: str | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -463,6 +466,66 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotAgilexDataConfig(DataConfigFactory):
+    """Data config for AgileX 6DoF+gripper LeRobot datasets.
+
+    Expected LeRobot keys:
+    - observation.images.front / left / right
+    - observation.state: 14 dims, left 6DoF+gripper then right 6DoF+gripper
+    - action: 14 dims, left 6DoF+gripper then right 6DoF+gripper
+    """
+
+    arm: Literal["left", "right", "both"] = "right"
+    use_delta_joint_actions: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/images/front": "observation.images.front",
+                        "observation/images/left": "observation.images.left",
+                        "observation/images/right": "observation.images.right",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "action_is_pad": "action_is_pad",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        action_dim = 14 if self.arm == "both" else 7
+        data_transforms = _transforms.Group(
+            inputs=[agilex_policy.AgilexInputs(arm=self.arm)],
+            outputs=[agilex_policy.AgilexOutputs(action_dim=action_dim)],
+        )
+
+        if self.use_delta_joint_actions:
+            delta_action_mask = (
+                _transforms.make_bool_mask(6, -1, 6, -1)
+                if self.arm == "both"
+                else _transforms.make_bool_mask(6, -1)
+            )
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
+            video_backend="pyav",
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -824,6 +887,53 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=20_000,
         batch_size=64,
+    ),
+    #
+    # Fine-tuning AgileX configs.
+    #
+    TrainConfig(
+        name="pi05_agilex_right_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            real_action_dim=7,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotAgilexDataConfig(
+            repo_id="/mnt/data/real_data/stack_bowl_0617_v21",
+            assets=AssetsConfig(asset_id="agilex_right"),
+            base_config=DataConfig(prompt_from_task=True),
+            arm="right",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        assets_base_dir="/mnt/data/hyn/model/agilex_assets",
+        checkpoint_base_dir="/mnt/data/hyn/model/agilex_checkpoints",
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=0,
+    ),
+    TrainConfig(
+        name="pi05_agilex_bimanual_arrange_flower_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            real_action_dim=14,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotAgilexDataConfig(
+            repo_id="/mnt/data/real_data/arrange_flower_0625_0626_merged_mpeg4",
+            assets=AssetsConfig(asset_id="agilex_bimanual_arrange_flower"),
+            base_config=DataConfig(prompt_from_task=True),
+            arm="both",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        assets_base_dir="/mnt/data/hyn/model/agilex_assets",
+        checkpoint_base_dir="/mnt/data/hyn/model/agilex_checkpoints",
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=0,
     ),
     #
     # Fine-tuning DROID configs.

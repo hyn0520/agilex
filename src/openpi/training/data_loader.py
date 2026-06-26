@@ -143,6 +143,7 @@ def create_torch_dataset(
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        video_backend=data_config.video_backend,
     )
 
     if data_config.prompt_from_task:
@@ -537,4 +538,7 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            if "action_is_pad" in batch:
+                yield _model.Observation.from_dict(batch), batch["actions"], ~batch["action_is_pad"]
+            else:
+                yield _model.Observation.from_dict(batch), batch["actions"]

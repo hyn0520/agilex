@@ -138,24 +138,37 @@ def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    batch: tuple[_model.Observation, _model.Actions] | tuple[_model.Observation, _model.Actions, at.Bool[at.Array, "*b ah"]],
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
     @at.typecheck
     def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
+        model: _model.BaseModel,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        action_loss_mask=None,
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+        if action_loss_mask is not None:
+            action_loss_mask = action_loss_mask.astype(chunked_loss.dtype)
+            return jnp.sum(chunked_loss * action_loss_mask) / jnp.maximum(jnp.sum(action_loss_mask), 1)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
+    if len(batch) == 3:
+        observation, actions, action_loss_mask = batch
+    else:
+        observation, actions = batch
+        action_loss_mask = None
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(
+        model, train_rng, observation, actions, action_loss_mask
+    )
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -187,7 +200,13 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        "train/loss": loss,
+        "train/grad_norm": optax.global_norm(grads),
+        "train/param_norm": optax.global_norm(kernel_params),
+        "train/learning_rate": config.lr_schedule.create()(state.step),
     }
+    if action_loss_mask is not None:
+        info["data/action_valid_ratio"] = jnp.mean(action_loss_mask.astype(jnp.float32))
     return new_state, info
 
 
